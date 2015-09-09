@@ -419,16 +419,19 @@ class Channel:
         channels = cls.search([('source', '=', 'magento')])
 
         for channel in channels:
-            channel.export_order_status_to_magento()
+            channel.export_order_status()
 
-    def export_order_status_to_magento(self):
+    def export_order_status(self):
         """
-        Export sale orders to magento for the current store view.
+        Export sale order status to magento for the current store view.
         If last export time is defined, export only those orders which are
         updated after last export time.
 
         :return: List of active records of sales exported
         """
+        if self.source != 'magento':
+            return super(Channel, self).export_order_status()
+
         Sale = Pool().get('sale.sale')
 
         self.validate_magento_channel()
@@ -616,6 +619,92 @@ class Channel:
                 )
 
         return len(product_listings)
+
+    def export_product_catalog(self):
+        """Export the current product to the magento category corresponding to
+        the given `category` under the current magento_channel in context
+
+        :param category: Active record of category to which the product has
+                         to be exported
+        :return: Active record of product
+        """
+        Channel = Pool().get('sale.channel')
+        Category = Pool().get('product.category')
+        ChannelListing = Pool().get('product.product.channel_listing')
+
+        if self.source != 'magento':
+            return super(Channel, self).export_product_catalog()
+
+        category = Category(Transaction().context.get('category'))
+
+        catalog_domain = [
+            ('channel', '=', self.id),
+        ]
+
+        if self.last_product_export_time:
+            catalog_domain.append([
+                'OR', [(
+                    'product.write_date', '>=',
+                    self.last_product_export_time
+                )], [(
+                    'product.template.write_date', '>=',
+                    self.last_product_export_time
+                )]
+            ])
+
+        product_listings = ChannelListing.search(catalog_domain)
+
+        self.last_product_export_time = datetime.utcnow()
+        self.save()
+
+        if not category.magento_ids:
+            self.raise_user_error(
+                'invalid_category', (category.complete_name,)
+            )
+        prodcuts_exported = []
+
+        for listing in product_listings:
+            if ChannelListing.search([
+                ('channel', '=', self.id),
+                ('product', '=', listing.product.id),
+            ]):
+                self.raise_user_error(
+                    'invalid_product', (listing.product.template.name,)
+                )
+
+            if not listing.product.code:
+                self.raise_user_error(
+                    'missing_product_code', (listing.product.template.name,)
+                )
+
+            with magento.Product(
+                self.magento_url, self.magento_api_user, self.magento_api_key
+            ) as product_api:
+                # We create only simple products on magento with the default
+                # attribute set
+                # TODO: We have to call the method from core API extension
+                # because the method for catalog create from core API does not
+                # seem to work. This should ideally be from core API rather than
+                # extension
+                magento_id = product_api.call(
+                    'ol_catalog_product.create', [
+                        'simple',
+                        int(Transaction().context['magento_attribute_set']),
+                        listing.product.code,
+                        self.get_product_values_for_export_to_magento(
+                            [category], [self]
+                        )
+                    ]
+                )
+                ChannelListing.create([{
+                    'product_identifier': str(magento_id),
+                    'channel': self.id,
+                    'product': listing.product.id,
+                    'magento_product_type': 'simple',
+                }])
+
+                prodcuts_exported.append(listing.product.id)
+        return prodcuts_exported
 
     def get_default_tryton_action(self, name):
         """

@@ -478,7 +478,8 @@ class TestProduct(TestBase):
                 with patch(
                     'magento.Product', mock_product_api(), create=True
                 ):
-                    product_template.products[0].export_to_magento(category)
+                    with Transaction().set_context(category=category.id):
+                        self.channel1.export_product_catalog()
 
 
 def suite():
